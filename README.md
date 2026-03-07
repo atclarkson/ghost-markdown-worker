@@ -61,15 +61,6 @@ Your blog's domain must be routed through Cloudflare so the worker can intercept
 
 Make sure the DNS record pointing to your Ghost server has the **orange cloud** (Proxied) enabled, not "DNS only". This is required for the worker to run.
 
-### Cloudron-specific note
-
-If Ghost is hosted on Cloudron, your setup likely looks like this:
-
-- **Public domain:** `yourblog.com` (what visitors see)
-- **Cloudron origin:** `ghost.yourdomain.com` or the same domain
-
-The Cloudflare DNS record for your public domain should point to your Cloudron server's IP with proxy (orange cloud) enabled. The worker will use `GHOST_URL` to reach the Ghost API at the correct origin -- see Step 3.
-
 ## Step 3: Configure the Worker
 
 Clone this repo and install dependencies:
