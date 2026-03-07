@@ -1,0 +1,13 @@
+name = "ghost-markdown-worker"
+main = "src/index.js"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Set your Ghost blog domain here
+routes = [{ pattern = "yourblog.com/*", zone_name = "yourblog.com" }]
+
+[vars]
+# GHOST_URL is the origin Ghost blog URL (e.g. https://yourblog.com)
+# Set via: wrangler secret put GHOST_API_KEY
+# GHOST_URL can be set here or as a secret
+# GHOST_URL = "https://yourblog.com"
