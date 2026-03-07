@@ -140,32 +140,6 @@ Successful `.md` responses are already cached by the Worker at the edge using Cl
 
 If you want a longer or shorter cache window, change the `Cache-Control` header in `src/index.js`.
 
-### Rate Limiting
-
-Caching should handle normal repeat traffic. Add one Cloudflare rate limiting rule as a backstop for abusive `.md` downloads.
-
-In the Cloudflare dashboard:
-
-1. Open your zone
-2. Go to **Security** > **WAF** > **Rate limiting rules**
-3. Create a rule for Markdown downloads
-4. Match requests using either the expression editor or equivalent UI fields:
-
-```txt
-(http.request.method in {"GET" "HEAD"} and http.request.uri.path ends_with ".md")
-```
-
-Recommended starting settings:
-
-- **Action:** `Managed Challenge`
-- **Requests:** `60`
-- **Period:** `1 minute`
-- **Characteristics:** keep the default per-visitor/IP behavior from the dashboard
-
-If you want to observe traffic before enforcing, start with `Log` first, then change the action to `Managed Challenge` after checking Security Events.
-
-Cloudflare plan limits and dashboard labels can vary. If your plan exposes extra controls such as whether cached assets are counted, keep the configuration simple unless you have measured traffic that requires tuning.
-
 ---
 
 ## Local Development
