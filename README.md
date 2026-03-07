@@ -1,6 +1,6 @@
 # Ghost Markdown Worker
 
-A Cloudflare Worker that lets anyone download any post on your [Ghost](https://ghost.org) blog as a clean Markdown file -- just change the URL extension to `.md`.
+A Cloudflare Worker that lets anyone (i.e AI-bots) view any post on your [Ghost](https://ghost.org) blog as a clean Markdown file -- just change the URL extension to `.md`.
 
 ```
 https://yourblog.com/my-post/     <- normal HTML post
@@ -23,7 +23,7 @@ Cloudflare Workers don't have a native DOM, but the [Turndown](https://github.co
 
 ## Prerequisites
 
-- **A Ghost blog** -- self-hosted (e.g. on [Cloudron](https://www.cloudron.io/store/com.ghost.cloudronapp.html), Docker, etc.) or Ghost(Pro)
+- **A Ghost blog** -- self-hosted (e.g. on Docker, etc.)
 - **A Cloudflare account** (free plan works) with your blog's domain added
 - **Node.js** v18 or later
 - **npm** (comes with Node.js)
