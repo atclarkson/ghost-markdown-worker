@@ -7,6 +7,8 @@ const turndown = new TurndownService({
   bulletListMarker: '-',
 });
 
+const LLMS_POST_LIMIT = 25;
+
 // Convert Ghost image cards
 turndown.addRule('ghostImage', {
   filter(node) {
@@ -41,6 +43,17 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    if (url.pathname === '/llms.txt') {
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        return new Response('Method not allowed', {
+          status: 405,
+          headers: { 'Allow': 'GET, HEAD' },
+        });
+      }
+
+      return handleLlmsTxtRequest(request, url, env, ctx);
+    }
+
     // Check if request is for a .md file
     if (url.pathname.endsWith('.md')) {
       if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -57,6 +70,84 @@ export default {
     return handleHtmlPassthrough(request, url);
   },
 };
+
+async function handleLlmsTxtRequest(request, url, env, ctx) {
+  const ghostApiKey = env.GHOST_API_KEY;
+  const ghostUrl = env.GHOST_URL || url.origin;
+
+  if (!ghostApiKey) {
+    return new Response('GHOST_API_KEY not configured', { status: 500 });
+  }
+
+  const cacheKey = new Request(url.toString(), { method: 'GET' });
+  const cache = caches.default;
+  const cachedResponse = await cache.match(cacheKey);
+  if (cachedResponse) {
+    return asHeadResponseIfNeeded(request, cachedResponse);
+  }
+
+  const [settings, posts] = await Promise.all([
+    fetchGhostJson(
+      `${ghostUrl}/ghost/api/content/settings/?key=${ghostApiKey}`,
+      '/llms.txt',
+      'Ghost settings'
+    ),
+    fetchGhostJson(
+      `${ghostUrl}/ghost/api/content/posts/?key=${ghostApiKey}&limit=${LLMS_POST_LIMIT}`,
+      '/llms.txt',
+      'Ghost post index'
+    ),
+  ]);
+
+  if (settings.error) {
+    return settings.error;
+  }
+
+  if (posts.error) {
+    return posts.error;
+  }
+
+  const site = settings.data.settings || {};
+  const recentPosts = posts.data.posts || [];
+  const siteTitle = site.title || url.hostname;
+  const siteDescription = site.description || `Published Ghost posts from ${url.hostname}`;
+
+  const lines = [
+    `# ${siteTitle}`,
+    '',
+    `> ${siteDescription}`,
+    '',
+    'This site exposes published Ghost posts as Markdown by appending `.md` to post URLs.',
+    '',
+    '## Recent posts',
+  ];
+
+  if (recentPosts.length === 0) {
+    lines.push('', 'No published posts were returned by the Ghost Content API.');
+  } else {
+    for (const post of recentPosts) {
+      const markdownUrl = buildMarkdownUrlForPost(post, url.origin);
+      if (!markdownUrl) {
+        continue;
+      }
+
+      const summary = post.custom_excerpt || post.excerpt;
+      const summaryText = summary ? `: ${sanitizeText(summary)}` : '';
+      lines.push(`- [${post.title}](${markdownUrl})${summaryText}`);
+    }
+  }
+
+  const response = new Response(`${lines.join('\n')}\n`, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'public, max-age=300, s-maxage=300, stale-while-revalidate=60',
+    },
+  });
+
+  ctx.waitUntil(cache.put(cacheKey, response.clone()));
+  return asHeadResponseIfNeeded(request, response);
+}
 
 async function handleMarkdownRequest(request, url, env, ctx) {
   // Extract slug: /some/path/my-post.md -> my-post
@@ -234,6 +325,34 @@ function escapeYaml(str) {
   return str.replace(/"/g, '\\"');
 }
 
+async function fetchGhostJson(apiUrl, requestPath, targetName) {
+  let apiResponse;
+
+  try {
+    apiResponse = await fetch(apiUrl, {
+      headers: { 'Accept': 'application/json' },
+    });
+  } catch (err) {
+    console.error(`${targetName} fetch failed`, {
+      path: requestPath,
+      error: formatError(err),
+    });
+    return {
+      error: new Response('Upstream unavailable', { status: 502 }),
+    };
+  }
+
+  if (!apiResponse.ok) {
+    return {
+      error: new Response(`${targetName} error: ${apiResponse.status}`, { status: apiResponse.status }),
+    };
+  }
+
+  return {
+    data: await apiResponse.json(),
+  };
+}
+
 function asHeadResponseIfNeeded(request, response) {
   if (request.method !== 'HEAD') {
     return response;
@@ -248,4 +367,25 @@ function asHeadResponseIfNeeded(request, response) {
 
 function formatError(err) {
   return err instanceof Error ? err.message : String(err);
+}
+
+function buildMarkdownUrlForPost(post, publicOrigin) {
+  const canonicalUrl = post.url || `${publicOrigin}/${post.slug}/`;
+
+  try {
+    const parsedUrl = new URL(canonicalUrl);
+    let path = parsedUrl.pathname;
+
+    if (path.endsWith('/') && path.length > 1) {
+      path = path.slice(0, -1);
+    }
+
+    return `${parsedUrl.origin}${path}.md`;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeText(str) {
+  return str.replace(/\s+/g, ' ').trim();
 }
