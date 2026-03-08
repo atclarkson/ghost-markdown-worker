@@ -5,9 +5,12 @@ A Cloudflare Worker that lets anyone (i.e AI-bots) view any post on your [Ghost]
 ```
 https://yourblog.com/my-post/     <- normal HTML post
 https://yourblog.com/my-post.md   <- same post as Markdown
+https://yourblog.com/llms.txt     <- site index for llms.txt-compatible clients
 ```
 
 The returned Markdown includes YAML frontmatter with title, date, tags, and canonical URL, ready for static site generators, note-taking apps, or archiving.
+
+The worker can also generate a simple `llms.txt` file that points models and tools at the latest post-level Markdown URLs.
 
 ## How It Works
 
@@ -125,6 +128,7 @@ That's it! Your worker is live. Test it:
 
 ```bash
 curl https://yourblog.com/any-post-slug.md
+curl https://yourblog.com/llms.txt
 ```
 
 ## Step 5: Configure Caching and Rate Limiting
@@ -179,6 +183,17 @@ tags: ["javascript", "cloudflare", "ghost"]
 canonical_url: "https://yourblog.com/my-blog-post-title/"
 ---
 ```
+
+### llms.txt
+
+The worker can generate `https://yourblog.com/llms.txt` using Ghost site settings plus the latest published posts from the Ghost Content API.
+
+The file includes:
+
+- the site title
+- the site description
+- a short note that `.md` URLs are available
+- a list of recent published posts pointing at their Markdown URLs
 
 ### Ghost-Specific Conversions
 
