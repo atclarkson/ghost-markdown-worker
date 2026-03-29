@@ -1,14 +1,15 @@
 # Ghost Markdown Worker
 
-A Cloudflare Worker that lets anyone (i.e AI-bots) view any post on your [Ghost](https://ghost.org) blog as a clean Markdown file -- just change the URL extension to `.md`.
+A Cloudflare Worker that lets anyone (i.e AI-bots) view any post on your [Ghost](https://ghost.org) blog as clean Markdown, either by changing the URL extension to `.md` or by sending `Accept: text/markdown` to the normal post URL.
 
 ```
 https://yourblog.com/my-post/     <- normal HTML post
 https://yourblog.com/my-post.md   <- same post as Markdown
+curl -H 'Accept: text/markdown' https://yourblog.com/my-post/   <- same post as Markdown
 https://yourblog.com/llms.txt     <- site index for llms.txt-compatible clients
 ```
 
-The returned Markdown includes YAML frontmatter with title, date, tags, and canonical URL, ready for static site generators, note-taking apps, or archiving.
+The returned Markdown includes YAML frontmatter with title, date, tags, canonical URL, slug, description, author, language, published and updated timestamps, and feature image metadata.
 
 The worker can also generate a simple `llms.txt` file that points models and tools at the latest post-level Markdown URLs.
 
@@ -18,7 +19,7 @@ The worker sits between visitors and your Ghost blog via Cloudflare's network:
 
 ![Architecture diagram showing two flows: .md requests are intercepted by the Cloudflare Worker which fetches from Ghost Content API, converts HTML to Markdown and returns text/markdown. Regular HTML requests pass through to Ghost and the worker injects a link alternate tag.](docs/architecture.png)
 
-For regular page visits, it passes the request through to Ghost unchanged, but injects a `<link rel="alternate" type="text/markdown">` tag so browsers and tools can discover the Markdown version.
+For regular page visits, it passes the request through to Ghost unchanged, injects a `<link rel="alternate" type="text/markdown">` tag, and adds a matching `Link` response header so browsers and tools can discover the Markdown version.
 
 ### Technical Note: Turndown in Workers
 
@@ -28,7 +29,7 @@ Cloudflare Workers don't have a native DOM, but the [Turndown](https://github.co
 
 - **A Ghost blog** -- self-hosted (e.g. on Docker, etc.)
 - **A Cloudflare account** (free plan works) with your blog's domain added
-- **Node.js** v18 or later
+- **Node.js** v20.3 or later
 - **npm** (comes with Node.js)
 
 ---
@@ -128,6 +129,7 @@ That's it! Your worker is live. Test it:
 
 ```bash
 curl https://yourblog.com/any-post-slug.md
+curl -H 'Accept: text/markdown' https://yourblog.com/any-post-slug/
 curl https://yourblog.com/llms.txt
 ```
 
@@ -135,10 +137,11 @@ curl https://yourblog.com/llms.txt
 
 ### Caching
 
-Successful `.md` responses are already cached by the Worker at the edge using Cloudflare's Workers Cache API.
+Successful Markdown responses are already cached by the Worker at the edge using Cloudflare's Workers Cache API.
 
 - No extra dashboard cache rule is required for the basic setup
 - The current Worker response headers cache Markdown for 5 minutes and allow a short stale window while a fresh copy is generated
+- Markdown negotiated from the HTML post URL is cached separately from the HTML representation of that same URL
 - This cache is per Cloudflare data center, so the first `.md` request in a new region may still hit Ghost
 - Cache API behavior only works on your proxied custom domain, not in the Workers editor or Playground preview
 
@@ -167,6 +170,7 @@ Wrangler will start a local server (usually at `http://localhost:8787`). Test wi
 
 ```bash
 curl http://localhost:8787/my-post.md
+curl -H 'Accept: text/markdown' http://localhost:8787/my-post/
 ```
 
 ## Output Format
@@ -178,7 +182,14 @@ Every Markdown file includes YAML frontmatter:
 ```yaml
 ---
 title: "My Blog Post Title"
-date: 2024-06-15
+slug: "my-blog-post-title"
+description: "Short post summary"
+author: "Jane Doe"
+lang: "en"
+date: "2024-06-15"
+published_at: "2024-06-15T08:30:00.000Z"
+updated_at: "2024-06-16T10:12:00.000Z"
+feature_image: "https://yourblog.com/content/images/2024/06/cover.jpg"
 tags: ["javascript", "cloudflare", "ghost"]
 canonical_url: "https://yourblog.com/my-blog-post-title/"
 ---
@@ -192,7 +203,7 @@ The file includes:
 
 - the site title
 - the site description
-- a short note that `.md` URLs are available
+- a short note that `.md` URLs and `Accept: text/markdown` are available
 - a list of recent published posts pointing at their Markdown URLs
 
 ### Ghost-Specific Conversions
@@ -214,9 +225,15 @@ On regular HTML pages, the worker injects a discovery tag in `<head>`:
 <link rel="alternate" type="text/markdown" href="https://yourblog.com/my-post.md" />
 ```
 
+It also adds the corresponding HTTP response header:
+
+```http
+Link: <https://yourblog.com/my-post.md>; rel="alternate"; type="text/markdown"
+```
+
 The worker preserves nested post paths, so `/notes/my-post/` advertises `/notes/my-post.md`.
 
-This is skipped for the homepage, Ghost admin pages, Ghost asset paths (`/assets/`, `/content/`), collection pages such as `/tag/...` and `/author/...`, pagination paths like `/page/2/`, and existing file paths.
+This is skipped for the homepage, Ghost admin pages, Ghost asset paths (`/assets/`, `/content/`), collection pages such as `/tag/...` and `/author/...`, pagination paths like `/page/2/`, and existing file paths. HTML and Markdown responses that participate in negotiation also include `Vary: Accept`.
 
 ## Troubleshooting
 

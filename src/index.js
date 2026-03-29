@@ -1,13 +1,16 @@
 // Import local copy of non-browser Turndown (browser build needs native DOM)
 import TurndownService from './turndown.js';
 
+const LLMS_POST_LIMIT = 25;
+const MARKDOWN_CONTENT_TYPE = 'text/markdown; charset=utf-8';
+const MARKDOWN_CACHE_CONTROL = 'public, max-age=300, s-maxage=300, stale-while-revalidate=60';
+const MARKDOWN_CACHE_BUSTER = '__gmw_repr=markdown';
+
 const turndown = new TurndownService({
   headingStyle: 'atx',
   codeBlockStyle: 'fenced',
   bulletListMarker: '-',
 });
-
-const LLMS_POST_LIMIT = 25;
 
 // Convert Ghost image cards
 turndown.addRule('ghostImage', {
@@ -54,8 +57,8 @@ export default {
       return handleLlmsTxtRequest(request, url, env, ctx);
     }
 
-    // Check if request is for a .md file
-    if (url.pathname.endsWith('.md')) {
+    const requestMode = classifyRequest(request, url);
+    if (requestMode.kind === 'markdown') {
       if (request.method !== 'GET' && request.method !== 'HEAD') {
         return new Response('Method not allowed', {
           status: 405,
@@ -63,10 +66,9 @@ export default {
         });
       }
 
-      return handleMarkdownRequest(request, url, env, ctx);
+      return handleMarkdownRequest(request, url, env, ctx, requestMode);
     }
 
-    // For all other requests, pass through to origin and inject alternate link
     return handleHtmlPassthrough(request, url);
   },
 };
@@ -117,7 +119,7 @@ async function handleLlmsTxtRequest(request, url, env, ctx) {
     '',
     `> ${siteDescription}`,
     '',
-    'This site exposes published Ghost posts as Markdown by appending `.md` to post URLs.',
+    'This site exposes published Ghost posts as Markdown by appending `.md` to post URLs or by sending `Accept: text/markdown` to the HTML URL.',
     '',
     '## Recent posts',
   ];
@@ -133,7 +135,7 @@ async function handleLlmsTxtRequest(request, url, env, ctx) {
 
       const summary = post.custom_excerpt || post.excerpt;
       const summaryText = summary ? `: ${sanitizeText(summary)}` : '';
-      lines.push(`- [${post.title}](${markdownUrl})${summaryText}`);
+      lines.push(`- [${escapeMarkdownLinkText(post.title)}](${markdownUrl})${summaryText}`);
     }
   }
 
@@ -141,7 +143,7 @@ async function handleLlmsTxtRequest(request, url, env, ctx) {
     status: 200,
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'public, max-age=300, s-maxage=300, stale-while-revalidate=60',
+      'Cache-Control': MARKDOWN_CACHE_CONTROL,
     },
   });
 
@@ -149,11 +151,9 @@ async function handleLlmsTxtRequest(request, url, env, ctx) {
   return asHeadResponseIfNeeded(request, response);
 }
 
-async function handleMarkdownRequest(request, url, env, ctx) {
-  // Extract slug: /some/path/my-post.md -> my-post
-  const pathSegments = url.pathname.split('/');
-  const filename = pathSegments[pathSegments.length - 1];
-  const slug = filename.replace(/\.md$/, '');
+async function handleMarkdownRequest(request, url, env, ctx, requestMode) {
+  const pathSegments = requestMode.htmlPath.split('/');
+  const slug = pathSegments[pathSegments.length - 1];
 
   if (!slug) {
     return new Response('Missing slug', { status: 400 });
@@ -166,67 +166,86 @@ async function handleMarkdownRequest(request, url, env, ctx) {
     return new Response('GHOST_API_KEY not configured', { status: 500 });
   }
 
-  const cacheKey = new Request(url.toString(), { method: 'GET' });
+  const postResult = await fetchGhostJson(
+    `${ghostUrl}/ghost/api/content/posts/slug/${slug}/?key=${ghostApiKey}&formats=html&include=authors,tags`,
+    url.pathname,
+    'Ghost post lookup'
+  );
+
+  if (postResult.error) {
+    if (postResult.status === 404) {
+      return new Response(`Post not found: ${slug}`, { status: 404 });
+    }
+
+    return postResult.error;
+  }
+
+  const post = postResult.data.posts?.[0];
+  if (!post) {
+    return new Response(`Post not found: ${slug}`, { status: 404 });
+  }
+
+  const canonicalUrl = post.url || `${ghostUrl}/${slug}/`;
+  let canonicalPath;
+  try {
+    canonicalPath = normalizePathname(new URL(canonicalUrl).pathname);
+  } catch (err) {
+    console.error('Invalid canonical URL from Ghost', {
+      path: url.pathname,
+      canonicalUrl,
+      error: formatError(err),
+    });
+    return new Response('Invalid canonical URL', { status: 502 });
+  }
+
+  if (requestMode.htmlPath !== canonicalPath) {
+    return new Response('Canonical URL mismatch', { status: 404 });
+  }
+
   const cache = caches.default;
+  const cacheKey = createMarkdownCacheKey(url, canonicalPath);
   const cachedResponse = await cache.match(cacheKey);
   if (cachedResponse) {
     return asHeadResponseIfNeeded(request, cachedResponse);
   }
 
-  // Fetch post from Ghost Content API
-  const apiUrl = `${ghostUrl}/ghost/api/content/posts/slug/${slug}/?key=${ghostApiKey}&formats=html&include=tags`;
+  const settingsResult = await fetchGhostJson(
+    `${ghostUrl}/ghost/api/content/settings/?key=${ghostApiKey}`,
+    url.pathname,
+    'Ghost settings'
+  );
 
-  let apiResponse;
-  try {
-    apiResponse = await fetch(apiUrl, {
-      headers: { 'Accept': 'application/json' },
-    });
-  } catch (err) {
-    console.error('Ghost API fetch failed', {
-      path: url.pathname,
-      error: formatError(err),
-    });
-    return new Response('Upstream unavailable', { status: 502 });
-  }
-
-  if (!apiResponse.ok) {
-    if (apiResponse.status === 404) {
-      return new Response(`Post not found: ${slug}`, { status: 404 });
-    }
-    return new Response(`Ghost API error: ${apiResponse.status}`, { status: apiResponse.status });
-  }
-
-  const data = await apiResponse.json();
-  const post = data.posts?.[0];
-
-  if (!post) {
-    return new Response(`Post not found: ${slug}`, { status: 404 });
-  }
-
-  // Build YAML frontmatter
-  const tags = (post.tags || []).map((t) => t.name);
-  const canonicalUrl = post.url || `${ghostUrl}/${slug}/`;
+  const settings = settingsResult.error ? null : settingsResult.data.settings || null;
+  const tags = (post.tags || []).map((tag) => tag.name);
   const publishedDate = post.published_at ? post.published_at.split('T')[0] : '';
+  const description = post.meta_description || post.custom_excerpt || post.excerpt || '';
+  const author = post.primary_author?.name || '';
+  const lang = settings?.lang || '';
 
   const frontmatter = [
     '---',
     `title: "${escapeYaml(post.title)}"`,
-    `date: ${publishedDate}`,
-    `tags: [${tags.map((t) => `"${escapeYaml(t)}"`).join(', ')}]`,
-    `canonical_url: "${canonicalUrl}"`,
+    `slug: "${escapeYaml(post.slug || '')}"`,
+    `description: "${escapeYaml(description)}"`,
+    `author: "${escapeYaml(author)}"`,
+    `lang: "${escapeYaml(lang)}"`,
+    `date: ${publishedDate ? `"${escapeYaml(publishedDate)}"` : '""'}`,
+    `published_at: "${escapeYaml(post.published_at || '')}"`,
+    `updated_at: "${escapeYaml(post.updated_at || '')}"`,
+    `feature_image: "${escapeYaml(post.feature_image || '')}"`,
+    `tags: [${tags.map((tag) => `"${escapeYaml(tag)}"`).join(', ')}]`,
+    `canonical_url: "${escapeYaml(canonicalUrl)}"`,
     '---',
   ].join('\n');
 
-  // Convert HTML to Markdown
   const markdown = turndown.turndown(post.html || '');
-
   const body = `${frontmatter}\n\n${markdown}\n`;
-
   const response = new Response(body, {
     status: 200,
     headers: {
-      'Content-Type': 'text/markdown; charset=utf-8',
-      'Cache-Control': 'public, max-age=300, s-maxage=300, stale-while-revalidate=60',
+      'Content-Type': MARKDOWN_CONTENT_TYPE,
+      'Cache-Control': MARKDOWN_CACHE_CONTROL,
+      'Vary': 'Accept',
     },
   });
 
@@ -237,7 +256,6 @@ async function handleMarkdownRequest(request, url, env, ctx) {
 async function handleHtmlPassthrough(request, url) {
   let response;
   try {
-    // Pass request through to origin
     response = await fetch(request);
   } catch (err) {
     console.error('Origin fetch failed', {
@@ -252,16 +270,16 @@ async function handleHtmlPassthrough(request, url) {
     return response;
   }
 
-  // Build the .md alternate URL from the current path
-  // e.g. /my-post/ -> /my-post.md
   const mdUrl = buildMdUrl(url);
-
   if (!mdUrl) {
     return response;
   }
 
-  // Use HTMLRewriter to inject <link rel="alternate"> into <head>
-  return new HTMLRewriter()
+  if (request.method === 'HEAD') {
+    return addAlternateMarkdownHeaders(response, mdUrl);
+  }
+
+  const rewritten = new HTMLRewriter()
     .on('head', {
       element(element) {
         element.append(
@@ -271,12 +289,35 @@ async function handleHtmlPassthrough(request, url) {
       },
     })
     .transform(response);
+
+  return addAlternateMarkdownHeaders(rewritten, mdUrl);
+}
+
+function classifyRequest(request, url) {
+  if (url.pathname.endsWith('.md')) {
+    return {
+      kind: 'markdown',
+      htmlPath: buildHtmlPathFromMarkdownPath(url.pathname),
+    };
+  }
+
+  if (acceptsMarkdown(request.headers.get('Accept')) && buildMdUrl(url)) {
+    return {
+      kind: 'markdown',
+      htmlPath: normalizePathname(url.pathname),
+    };
+  }
+
+  return { kind: 'html' };
+}
+
+function buildHtmlPathFromMarkdownPath(pathname) {
+  return normalizePathname(pathname.replace(/\.md$/, ''));
 }
 
 function buildMdUrl(url) {
   let path = url.pathname;
 
-  // Remove trailing slash
   if (path.endsWith('/') && path.length > 1) {
     path = path.slice(0, -1);
   }
@@ -293,7 +334,6 @@ function buildMdUrl(url) {
   const firstSegment = segments[0];
   const lastSegment = segments[segments.length - 1];
 
-  // Skip Ghost internals, collection routes, and existing file paths.
   if (
     firstSegment === 'ghost' ||
     firstSegment === 'assets' ||
@@ -320,9 +360,81 @@ function buildMdUrl(url) {
   return `${url.origin}${path}.md`;
 }
 
+function createMarkdownCacheKey(url, canonicalPath) {
+  const cacheUrl = new URL(url.toString());
+  cacheUrl.pathname = canonicalPath;
+  cacheUrl.search = `?${MARKDOWN_CACHE_BUSTER}`;
+  cacheUrl.hash = '';
+  return new Request(cacheUrl.toString(), { method: 'GET' });
+}
+
+function addAlternateMarkdownHeaders(response, mdUrl) {
+  const headers = new Headers(response.headers);
+  headers.append('Link', `<${mdUrl}>; rel="alternate"; type="text/markdown"`);
+  addVaryValue(headers, 'Accept');
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function addVaryValue(headers, value) {
+  const vary = headers.get('Vary');
+  if (!vary) {
+    headers.set('Vary', value);
+    return;
+  }
+
+  const existing = vary
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (!existing.includes(value.toLowerCase())) {
+    headers.set('Vary', `${vary}, ${value}`);
+  }
+}
+
+function normalizePathname(pathname) {
+  if (!pathname || pathname === '/') {
+    return '/';
+  }
+
+  return pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+}
+
+function acceptsMarkdown(acceptHeader) {
+  if (!acceptHeader) {
+    return false;
+  }
+
+  return acceptHeader
+    .split(',')
+    .map((part) => part.trim())
+    .some((part) => {
+      const [mediaType, ...params] = part.split(';').map((item) => item.trim());
+      if (mediaType.toLowerCase() !== 'text/markdown') {
+        return false;
+      }
+
+      const qParam = params.find((param) => param.toLowerCase().startsWith('q='));
+      if (!qParam) {
+        return true;
+      }
+
+      const qValue = Number.parseFloat(qParam.slice(2));
+      return Number.isFinite(qValue) && qValue > 0;
+    });
+}
+
 function escapeYaml(str) {
   if (!str) return '';
-  return str.replace(/"/g, '\\"');
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/\r?\n/g, '\\n')
+    .replace(/"/g, '\\"');
 }
 
 async function fetchGhostJson(apiUrl, requestPath, targetName) {
@@ -339,17 +451,20 @@ async function fetchGhostJson(apiUrl, requestPath, targetName) {
     });
     return {
       error: new Response('Upstream unavailable', { status: 502 }),
+      status: 502,
     };
   }
 
   if (!apiResponse.ok) {
     return {
       error: new Response(`${targetName} error: ${apiResponse.status}`, { status: apiResponse.status }),
+      status: apiResponse.status,
     };
   }
 
   return {
     data: await apiResponse.json(),
+    status: apiResponse.status,
   };
 }
 
@@ -374,18 +489,25 @@ function buildMarkdownUrlForPost(post, publicOrigin) {
 
   try {
     const parsedUrl = new URL(canonicalUrl);
-    let path = parsedUrl.pathname;
-
-    if (path.endsWith('/') && path.length > 1) {
-      path = path.slice(0, -1);
-    }
-
-    return `${parsedUrl.origin}${path}.md`;
+    return buildMarkdownUrlFromPath(parsedUrl.pathname, parsedUrl.origin);
   } catch {
     return null;
   }
 }
 
+function buildMarkdownUrlFromPath(pathname, origin) {
+  const normalizedPath = normalizePathname(pathname);
+  if (normalizedPath === '/') {
+    return null;
+  }
+
+  return `${origin}${normalizedPath}.md`;
+}
+
 function sanitizeText(str) {
   return str.replace(/\s+/g, ' ').trim();
+}
+
+function escapeMarkdownLinkText(str) {
+  return String(str).replace(/([\\[\]])/g, '\\$1');
 }
